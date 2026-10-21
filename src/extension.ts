@@ -1,50 +1,48 @@
 import vscode from 'vscode';
-import { AuthManager } from './auth';
-import { ApiClient, ApiRequestError } from './client';
+import { ApiClient } from './client';
+import { getBaseUrl, getConfig, getDebugMode, getKeySettings, resolveKeys } from './config';
+import { CONFIG_DATA_VERSION_KEY, EXTERNAL_URLS } from './consts';
 import {
-	getBaseUrl,
-	getDebugMode,
-	getModelSettings,
-} from './config';
-import { EXTERNAL_URLS } from './consts';
-import { initLogger, logger, setLogLevel, showLogs } from './logger';
+	addKey,
+	editKeyModels,
+	refreshPricing,
+	removeKey,
+	renameKey,
+	showDiagnostics,
+	testConnections,
+	type KeyCommandDeps,
+} from './keys';
+import { CHANNEL_NAME, initLogger, logLine, logger, setLogLevel, showLogs } from './logger';
+import { formatRatio, isChatModel, listGroups } from './pricing';
+import { PricingStore } from './pricingStore';
 import { FourSapiChatProvider } from './provider';
-import type { ModelSetting, ThinkingConfig } from './types';
+import type { KeySetting, ModelSetting } from './types';
+import { KeyVault } from './vault';
+
+/** settings.json 配置数据的当前版本（用于一次性迁移旧结构） */
+const CONFIG_DATA_VERSION = 1;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-	initLogger('4SAPI', getDebugMode());
+	initLogger(CHANNEL_NAME, getDebugMode());
 	setLogLevel(getDebugMode());
 
-	const auth = new AuthManager(context.secrets);
-	const provider = new FourSapiChatProvider(context, auth);
+	const vault = new KeyVault(context.secrets);
+	const pricing = new PricingStore(context.globalState);
+	const provider = new FourSapiChatProvider(context, vault, pricing);
+	const deps: KeyCommandDeps = {
+		vault,
+		pricing,
+		refresh: () => provider.refreshModelPicker(),
+	};
 
 	context.subscriptions.push(
 		vscode.lm.registerLanguageModelChatProvider('4sapi', provider),
-		vscode.commands.registerCommand('4sapi-copilot.setApiKey', async () => {
-			if (await auth.promptForApiKey()) {
-				provider.refreshModelPicker();
-			}
-		}),
-		vscode.commands.registerCommand('4sapi-copilot.clearApiKey', async () => {
-			const confirm = '清除';
-			const picked = await vscode.window.showWarningMessage(
-				'确定清除已保存的 4SAPI API Key？',
-				{ modal: true },
-				confirm,
-			);
-			if (picked !== confirm) {
-				return;
-			}
-			await auth.deleteApiKey();
-			provider.refreshModelPicker();
-			void vscode.window.showInformationMessage('4SAPI: API Key 已清除。');
-		}),
-		vscode.commands.registerCommand('4sapi-copilot.testConnection', () =>
-			testConnection(auth),
-		),
-		vscode.commands.registerCommand('4sapi-copilot.fetchModels', () =>
-			fetchModels(auth, provider),
-		),
+		vscode.commands.registerCommand('4sapi-copilot.addKey', () => addKey(deps)),
+		vscode.commands.registerCommand('4sapi-copilot.removeKey', () => removeKey(deps)),
+		vscode.commands.registerCommand('4sapi-copilot.editKeyModels', () => editKeyModels(deps)),
+		vscode.commands.registerCommand('4sapi-copilot.renameKey', () => renameKey(deps)),
+		vscode.commands.registerCommand('4sapi-copilot.refreshPricing', () => refreshPricing(deps)),
+		vscode.commands.registerCommand('4sapi-copilot.testConnection', () => testConnections(deps)),
 		vscode.commands.registerCommand('4sapi-copilot.reloadModels', () => {
 			provider.refreshModelPicker();
 			void vscode.window.showInformationMessage('4SAPI: 模型列表已重新加载。');
@@ -52,8 +50,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('4sapi-copilot.openSettings', () => {
 			void vscode.commands.executeCommand('workbench.action.openSettings', '4sapi-copilot');
 		}),
-		vscode.commands.registerCommand('4sapi-copilot.showLogs', () => showLogs()),
+		vscode.commands.registerCommand('4sapi-copilot.showLogs', () => {
+			// 面板可能因当前 debugMode 过滤而几乎为空，先说明一下，免得用户以为没反应
+			logLine(
+				'INFO',
+				`已打开「${CHANNEL_NAME}」输出面板`,
+				`debugMode=${getDebugMode()}`,
+				getDebugMode() === 'minimal'
+					? '（当前只记录错误；想看请求详情请把 4sapi-copilot.debugMode 设为 metadata 或 verbose）'
+					: '',
+			);
+			showLogs(false);
+		}),
+		vscode.commands.registerCommand('4sapi-copilot.diagnostics', () => showDiagnostics(deps)),
 	);
+
+	await migrateLegacyConfig(context, vault, pricing);
+	await vault.pruneOrphans(getKeySettings().map((key) => key.id));
+	// 预热倍率表，让模型名里的消耗倍率在首次打开选择器时就可显示
+	void pricing.ensure(getBaseUrl()).then(() => provider.refreshModelPicker());
 
 	// 让模型尽快可被发现（Copilot 可能还在等自身激活）
 	provider.refreshModelPicker();
@@ -62,214 +77,116 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		(error: unknown) => logger.warn('激活 Copilot Chat 失败（不影响本扩展）:', String(error)),
 	);
 
-	logger.info('4SAPI for Copilot 已激活', `baseUrl=${getBaseUrl()}`);
+	const keys = resolveKeys(getKeySettings());
+	// 无条件写一行激活横幅：否则在 debugMode=minimal 且一切正常时输出通道是空白的，
+	// 用户会误以为「显示日志」命令没反应（日志按级别过滤，minimal 只记录错误）。
+	logLine(
+		'INFO',
+		'4SAPI 已就绪',
+		`版本=${context.extension.packageJSON?.version ?? '?'}`,
+		`baseUrl=${getBaseUrl()}`,
+		`Key 数=${keys.length}`,
+		`模型数=${keys.reduce((sum, key) => sum + key.models.length, 0)}`,
+		`debugMode=${getDebugMode()}`,
+	);
+	logger.info(
+		'4SAPI for Copilot 已激活',
+		`baseUrl=${getBaseUrl()}`,
+		`Key 数=${keys.length}`,
+		`模型数=${keys.reduce((sum, key) => sum + key.models.length, 0)}`,
+	);
 }
 
 export function deactivate(): void {
 	// 输出通道随扩展释放
 }
 
-// ---- 命令实现 ----
+// ---- 旧配置迁移 ----
 
-async function testConnection(auth: AuthManager): Promise<void> {
-	const apiKey = await requireApiKey(auth);
-	if (!apiKey) {
-		return;
-	}
-	const client = new ApiClient(getBaseUrl(), apiKey, {});
-	try {
-		const models = await client.listModels();
-		const preview = models.slice(0, 8).join('、');
-		void vscode.window.showInformationMessage(
-			`4SAPI 连接成功：当前 Key 可用模型 ${models.length} 个${preview ? `（${preview}${models.length > 8 ? '…' : ''}）` : ''}`,
-		);
-		logger.info('连接测试成功', `模型数=${models.length}`);
-	} catch (error) {
-		reportError('连接测试失败', error);
-	}
-}
-
-/** 拉取 GET /v1/models 并按命名启发式生成模型配置，写入 settings.json */
-async function fetchModels(auth: AuthManager, provider: FourSapiChatProvider): Promise<void> {
-	const apiKey = await requireApiKey(auth);
-	if (!apiKey) {
-		return;
-	}
-	const client = new ApiClient(getBaseUrl(), apiKey, {});
-	let modelIds: string[];
-	try {
-		modelIds = await client.listModels();
-	} catch (error) {
-		reportError('拉取模型列表失败', error);
-		return;
-	}
-	if (modelIds.length === 0) {
-		void vscode.window.showWarningMessage('4SAPI 未返回任何模型，请检查 Key 权限或套餐。');
+/**
+ * 一次性迁移旧版本（0.1.x）配置：单个 API Key（SecretStorage 或 settings 的 `apiKey`）
+ * + `models` 数组 → 第一个 `keys[]` 条目，并按 `/api/pricing` 推断分组与倍率。
+ */
+async function migrateLegacyConfig(
+	context: vscode.ExtensionContext,
+	vault: KeyVault,
+	pricing: PricingStore,
+): Promise<void> {
+	const version = context.globalState.get<number>(CONFIG_DATA_VERSION_KEY, 0);
+	if (version >= CONFIG_DATA_VERSION) {
 		return;
 	}
 
-	const existing = new Set(getModelSettings().map((m) => m.id));
-	const picked = await vscode.window.showQuickPick(
-		modelIds.map((id) => ({
-			label: existing.has(id) ? `$(check) ${id}` : id,
-			description: existing.has(id) ? '已在配置中' : suggestParams(id),
-			picked: !existing.has(id),
-			id,
-		})),
-		{
-			canPickMany: true,
-			title: '选择要暴露到 Copilot Chat 的 4SAPI 模型',
-			placeHolder: '勾选模型后将写入 4sapi-copilot.models（可在设置中继续调整上下文长度、思考深度等参数）',
-		},
-	);
-	if (!picked || picked.length === 0) {
-		return;
-	}
-
-	const current = getModelSettings();
-	const currentById = new Map(current.map((m) => [m.id, m]));
-	const merged: ModelSetting[] = [...current];
-	for (const item of picked) {
-		if (!currentById.has(item.id)) {
-			merged.push(generateModelSetting(item.id));
+	if (getKeySettings().length === 0) {
+		const legacyApiKey =
+			(await vault.getLegacyApiKey()) || getConfig().get<string>('apiKey')?.trim() || undefined;
+		if (legacyApiKey) {
+			const key = await buildMigratedKey(legacyApiKey, pricing);
+			// 先落盘新结构、确认成功后再清理旧密钥，避免中途失败导致 Key 丢失
+			await saveKeys([key]);
+			await vault.setApiKey(key.id, legacyApiKey);
+			await vault.deleteLegacyApiKey();
+			void vscode.window.showInformationMessage(
+				`4SAPI: 已把原来的 API Key 迁移为 Key「${key.alias}」` +
+					`${key.group ? `（分组 ${key.group} · ${formatRatio(key.groupRatio)}）` : ''}，` +
+					`共 ${key.models?.length ?? 0} 个模型。可用「4SAPI: 编辑 Key 的模型列表」调整。`,
+			);
 		}
 	}
 
-	await vscode.workspace
-		.getConfiguration('4sapi-copilot')
-		.update('models', merged, vscode.ConfigurationTarget.Global);
-	provider.refreshModelPicker();
-
-	const added = merged.length - current.length;
-	void vscode.window.showInformationMessage(
-		added > 0
-			? `4SAPI: 已添加 ${added} 个模型。默认参数为建议值，请到设置中按需调整上下文长度、最大输出与思考深度。`
-			: '4SAPI: 所选模型已在配置中。',
-	);
-	if (added > 0) {
-		void vscode.commands.executeCommand('workbench.action.openSettings', '4sapi-copilot.models');
+	const config = getConfig();
+	if ((config.get<unknown[]>('models') ?? []).length > 0) {
+		await config.update('models', undefined, vscode.ConfigurationTarget.Global);
 	}
+	await context.globalState.update(CONFIG_DATA_VERSION_KEY, CONFIG_DATA_VERSION);
 }
 
-async function requireApiKey(auth: AuthManager): Promise<string | undefined> {
-	const apiKey = await auth.getApiKey();
-	if (apiKey) {
-		return apiKey;
-	}
-	const picked = await vscode.window.showWarningMessage(
-		'尚未配置 4SAPI API Key。',
-		{ modal: true },
-		'立即设置',
-	);
-	if (picked === '立即设置') {
-		if (await auth.promptForApiKey()) {
-			return auth.getApiKey();
+async function buildMigratedKey(apiKey: string, pricing: PricingStore): Promise<KeySetting> {
+	const baseUrl = getBaseUrl();
+	const legacyModels = getConfig().get<ModelSetting[]>('models', []) ?? [];
+
+	// 旧 `models` 条目的 id 即发给 4SAPI 的真实模型名
+	let models = legacyModels
+		.map((model) => (model?.apiModelId ?? model?.id ?? '').trim())
+		.filter((id) => id.length > 0);
+
+	let group = '';
+	let groupRatio: number | undefined;
+	let alias = '默认 Key';
+
+	try {
+		const liveModelIds = await new ApiClient(baseUrl, apiKey, {}).listModels();
+		const snapshot = (await pricing.reload(baseUrl)).snapshot;
+		if (models.length === 0) {
+			models = liveModelIds.filter((id) => !snapshot || isChatModel(snapshot, id));
 		}
+		if (snapshot) {
+			// `/v1/models` 已按该 Key 的权限过滤，其可用分组即该 Key 绑定的分组
+			const inferred = listGroups(snapshot, liveModelIds);
+			if (inferred.length > 0) {
+				group = inferred[0].group;
+				groupRatio = inferred[0].ratio;
+				alias = group;
+			}
+			if (group) {
+				const allowed = new Set(
+					liveModelIds.filter((id) => {
+						const entry = snapshot.models[id];
+						return !entry || entry.enableGroups.includes(group);
+					}),
+				);
+				models = models.filter((id) => allowed.has(id));
+			}
+		}
+	} catch (error) {
+		logger.warn('迁移旧配置时无法获取模型 / 倍率:', String(error));
 	}
-	return undefined;
+
+	return { id: 'key-legacy', alias, enabled: true, group, groupRatio, models };
 }
 
-function reportError(prefix: string, error: unknown): void {
-	const message =
-		error instanceof ApiRequestError
-			? `${prefix}：${error.message}`
-			: `${prefix}：${error instanceof Error ? error.message : String(error)}`;
-	void vscode.window.showErrorMessage(message);
-	logger.error(prefix, error instanceof Error ? error.message : String(error));
-}
-
-// ---- 模型名启发式（仅为建议默认值，最终以 4SAPI 控制台参数为准） ----
-
-function suggestParams(id: string): string {
-	const p = generateModelSetting(id);
-	return `${p.maxInputTokens}/${p.maxOutputTokens} tokens`;
-}
-
-function generateModelSetting(id: string): ModelSetting {
-	const lower = id.toLowerCase();
-	const base: ModelSetting = {
-		id,
-		name: `${id} (4SAPI)`,
-		enabled: true,
-		toolCalling: true,
-		imageInput: false,
-		maxInputTokens: 128000,
-		maxOutputTokens: 32768,
-	};
-
-	if (lower.includes('claude')) {
-		return {
-			...base,
-			family: 'claude',
-			imageInput: true,
-			maxInputTokens: 200000,
-			maxOutputTokens: 64000,
-			thinking: anthropicThinking(['low', 'medium', 'high', 'max'], 'high'),
-		};
-	}
-	if (lower.includes('gpt-5') || lower.includes('o1') || lower.includes('o3') || lower.includes('o4')) {
-		return {
-			...base,
-			family: 'gpt',
-			imageInput: !lower.includes('codex'),
-			maxInputTokens: 200000,
-			maxOutputTokens: 64000,
-			thinking: openaiThinking(['minimal', 'low', 'medium', 'high'], 'medium'),
-		};
-	}
-	if (lower.includes('gemini')) {
-		return {
-			...base,
-			family: 'gemini',
-			imageInput: true,
-			maxInputTokens: 1048576,
-			maxOutputTokens: 65536,
-			thinking: openaiThinking(['low', 'medium', 'high'], 'medium'),
-		};
-	}
-	if (lower.includes('deepseek')) {
-		return {
-			...base,
-			family: 'deepseek',
-			maxInputTokens: 131072,
-			maxOutputTokens: 65536,
-			thinking: deepseekThinking(['low', 'high', 'max'], 'high'),
-		};
-	}
-	if (
-		lower.includes('qwen') ||
-		lower.includes('glm') ||
-		lower.includes('kimi') ||
-		lower.includes('moonshot') ||
-		lower.includes('doubao')
-	) {
-		return {
-			...base,
-			family: 'qwen',
-			maxInputTokens: 131072,
-			maxOutputTokens: 32768,
-			thinking: openaiThinking(['low', 'medium', 'high'], 'medium'),
-		};
-	}
-	return base;
-}
-
-function openaiThinking(efforts: string[], def: string): ThinkingConfig {
-	return { style: 'openai', supportedEfforts: efforts, defaultEffort: def, canDisable: true };
-}
-
-function deepseekThinking(efforts: string[], def: string): ThinkingConfig {
-	return { style: 'deepseek', supportedEfforts: efforts, defaultEffort: def, canDisable: true };
-}
-
-function anthropicThinking(efforts: string[], def: string): ThinkingConfig {
-	return {
-		style: 'anthropic',
-		supportedEfforts: efforts,
-		defaultEffort: def,
-		canDisable: true,
-		effortBudgets: { low: 4096, medium: 8192, high: 16384, max: 32768 },
-	};
+async function saveKeys(keys: KeySetting[]): Promise<void> {
+	await getConfig().update('keys', keys, vscode.ConfigurationTarget.Global);
 }
 
 // 保留外部链接常量引用（README / 未来 UI 使用）

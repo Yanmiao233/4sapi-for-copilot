@@ -5,8 +5,20 @@
 /** VS Code 配置节前缀 */
 export const CONFIG_SECTION = '4sapi-copilot';
 
-/** SecretStorage 中保存 API Key 的键名 */
-export const API_KEY_SECRET = '4sapi-copilot.apiKey';
+/** SecretStorage 中单个 API Key 的键名前缀（完整键名：`<前缀><keyId>`） */
+export const KEY_SECRET_PREFIX = '4sapi-copilot.key.';
+
+/** 历史版本中保存单一 API Key 的 SecretStorage 键名（迁移用） */
+export const LEGACY_API_KEY_SECRET = '4sapi-copilot.apiKey';
+
+/** globalState 中缓存 `/api/pricing` 倍率表的键名 */
+export const PRICING_CACHE_KEY = '4sapi-copilot.pricingCache';
+
+/** 已写入 settings.json 的配置数据版本（用于一次性迁移） */
+export const CONFIG_DATA_VERSION_KEY = 'configDataVersion';
+
+/** 倍率表缓存的建议有效期（毫秒）；过期后下次使用时静默刷新 */
+export const PRICING_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 
 /** 4SAPI 官方接入地址（可在国内/海外域名间切换） */
 export const DEFAULT_BASE_URL = 'https://4sapi.com/v1';

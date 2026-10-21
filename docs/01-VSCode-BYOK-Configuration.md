@@ -134,7 +134,8 @@
 - DeepSeek 系需要 `thinking:{type:...}` + `reasoning_content` 回填（缓存命中率、思考块渲染）；
 - Claude 系思考深度要映射成 `thinking.budget_tokens`，而不是 `reasoning_effort`；
 - 需要逐模型 `stop`、`extraBody` 自定义参数、每模型请求头；
-- 想一条命令**从 `/v1/models` 拉取全部可用模型并生成配置**，不想手写 JSON；
+- 需要在**同一插件里管理多个 Key（多个分组）**，并按分组显示各自倍率；
+- 想一条命令拉取某 Key 的可用模型、自动推断其分组并生成配置，不想手写 JSON；
 - 想要请求日志、用量校准、连接测试等调试能力。
 
 这些都做进了 `4sapi-for-copilot` 插件，用法见 [`../README.md`](../README.md)。构建：
@@ -145,7 +146,7 @@ npm install
 npm run compile      # 或 npm run package 生成 .vsix
 ```
 
-安装后：`Ctrl+Shift+P` → **4SAPI: 设置 API Key** → **4SAPI: 从服务器拉取模型列表并生成配置** → 在设置里按需调整每个模型的 `maxInputTokens`（上下文长度）、`thinking`（思考深度）等参数，模型选择器即出现 4SAPI 分组。
+安装后：`Ctrl+Shift+P` → **4SAPI: 添加 API Key**（粘贴按分组创建的 Key → 确认自动推断出的分组与倍率 → 勾选要暴露的模型）。想再加别的分组就重复一次；模型在选择器里显示为 `模型名 (倍率, 分组)`，需要时在设置里按 Key 调整 `modelOverrides`（`maxInputTokens` 上下文长度、`thinking` 思考深度等）。
 
 ---
 

@@ -1,10 +1,14 @@
 import vscode from 'vscode';
-import {
-	CONFIG_SECTION,
-	DEFAULT_MAX_INPUT_TOKENS,
-	DEFAULT_MAX_OUTPUT_TOKENS,
-} from './consts';
-import type { ModelSetting, ResolvedModel, ThinkingConfig } from './types';
+import { CONFIG_SECTION } from './consts';
+import { deriveModelDefaults } from './defaults';
+import { formatRatio, modelRatio } from './pricing';
+import type {
+	KeySetting,
+	PricingSnapshot,
+	ResolvedKey,
+	ResolvedModel,
+	ThinkingConfig,
+} from './types';
 
 export type DebugMode = 'minimal' | 'metadata' | 'verbose';
 
@@ -46,51 +50,98 @@ export function getDebugMode(): DebugMode {
 	return value === 'metadata' || value === 'verbose' ? value : 'minimal';
 }
 
-/** settings.json 中启用的模型条目 */
-export function getModelSettings(): ModelSetting[] {
-	const raw = getConfig().get<ModelSetting[]>('models', []);
-	return (Array.isArray(raw) ? raw : []).filter((m) => m && typeof m.id === 'string');
+/** settings.json 中配置的 API Key 元数据 */
+export function getKeySettings(): KeySetting[] {
+	const raw = getConfig().get<KeySetting[]>('keys', []);
+	return (Array.isArray(raw) ? raw : []).filter(
+		(key) => key && typeof key.id === 'string' && key.id.trim().length > 0,
+	);
 }
 
-/** 把模型条目解析为带完整默认值的内部定义 */
-export function resolveModels(): ResolvedModel[] {
-	return getModelSettings()
-		.filter((m) => m.enabled !== false)
-		.map(resolveModel);
+/** 把 Key 条目解析为带完整默认值的内部定义 */
+export function resolveKeys(settings: KeySetting[] = getKeySettings()): ResolvedKey[] {
+	return settings
+		.filter((key) => key.enabled !== false)
+		.map((key) => ({
+			id: key.id.trim(),
+			alias: key.alias?.trim() || key.group?.trim() || key.id.trim(),
+			group: key.group?.trim() || '',
+			groupRatio: key.groupRatio,
+			models: Array.isArray(key.models) ? key.models.filter((id) => id?.trim()) : [],
+			modelOverrides: key.modelOverrides ?? {},
+		}));
 }
 
-export function resolveModel(setting: ModelSetting): ResolvedModel {
-	const maxOutputTokens = positive(setting.maxOutputTokens) ?? DEFAULT_MAX_OUTPUT_TOKENS;
-	const contextWindow = positive(setting.contextWindow);
-	const maxInputTokens =
-		positive(setting.maxInputTokens) ??
-		(contextWindow ? contextWindow - maxOutputTokens : undefined) ??
-		DEFAULT_MAX_INPUT_TOKENS;
-
+/**
+ * 把一个 Key 的模型解析为带完整默认值的内部定义。
+ * 参数优先级：`keys[].modelOverrides[modelId]` > 倍率表元数据（上下文规格 / 模型族）> 全局默认值。
+ * 选择器 ID 带 Key 前缀（`<keyId>/<modelId>`），因此不同 Key 下同名模型不会冲突，
+ * 显示名带分组与消耗倍率（如 `claude-sonnet-4-6 (5x, claude-官方)`），便于区分同名但倍率不同的模型。
+ */
+export function resolveModelsForKey(
+	key: ResolvedKey,
+	pricing: PricingSnapshot | undefined,
+): ResolvedModel[] {
 	const globalMaxTokens = getGlobalMaxTokens();
-	const modelMaxTokens = positive(setting.maxTokens);
 
-	return {
-		id: setting.id.trim(),
-		apiModelId: setting.apiModelId?.trim() || setting.id.trim(),
-		name: setting.name?.trim() || setting.id.trim(),
-		family: setting.family?.trim() || '4sapi',
-		version: setting.version?.trim() ?? '',
-		detail: setting.detail?.trim() || '4SAPI 聚合模型',
-		maxInputTokens,
-		maxOutputTokens,
-		toolCalling: setting.toolCalling !== false,
-		imageInput: setting.imageInput === true,
-		thinking: normalizeThinking(setting.thinking),
-		temperature: numberOrUndefined(setting.temperature),
-		topP: numberOrUndefined(setting.topP),
-		maxTokens: modelMaxTokens ?? (globalMaxTokens > 0 ? globalMaxTokens : maxOutputTokens),
-		stop: Array.isArray(setting.stop) && setting.stop.length > 0 ? setting.stop : undefined,
-		extraBody: setting.extraBody && Object.keys(setting.extraBody).length > 0
-			? setting.extraBody
-			: undefined,
-		requestHeaders: setting.requestHeaders ?? {},
-	};
+	return key.models.map((modelId) => {
+		const override = key.modelOverrides[modelId] ?? {};
+		const defaults = deriveModelDefaults(modelId, pricing);
+
+		const maxOutputTokens = positive(override.maxOutputTokens) ?? defaults.maxOutputTokens;
+		const contextWindow = positive(override.contextWindow);
+		const maxInputTokens =
+			positive(override.maxInputTokens) ??
+			(contextWindow ? contextWindow - maxOutputTokens : undefined) ??
+			defaults.maxInputTokens;
+
+		const modelMaxTokens = positive(override.maxTokens);
+		// 倍率来自公开倍率表；表不可用（离线）时退回该 Key 在配置中缓存的倍率
+		const ratio = modelRatio(pricing, modelId, key.group) ?? key.groupRatio;
+		const suffix = [ratio === undefined ? '' : formatRatio(ratio), key.group]
+			.filter(Boolean)
+			.join(', ');
+		const displayName = override.name?.trim() || `${modelId} (${suffix || key.alias})`;
+
+		return {
+			id: `${key.id}/${modelId}`,
+			apiModelId: override.apiModelId?.trim() || modelId,
+			name: displayName,
+			keyId: key.id,
+			keyAlias: key.alias,
+			group: key.group,
+			groupRatio: ratio,
+			family: override.family?.trim() || defaults.family,
+			version: override.version?.trim() ?? '',
+			detail:
+				override.detail?.trim() ||
+				[defaults.vendor, `分组 ${key.group} · ${formatRatio(ratio)}`, key.alias]
+					.filter(Boolean)
+					.join(' · '),
+			maxInputTokens,
+			maxOutputTokens,
+			toolCalling: override.toolCalling ?? defaults.toolCalling,
+			imageInput: override.imageInput ?? defaults.imageInput,
+			thinking: normalizeThinking(override.thinking ?? defaults.thinking),
+			temperature: numberOrUndefined(override.temperature),
+			topP: numberOrUndefined(override.topP),
+			maxTokens: modelMaxTokens ?? (globalMaxTokens > 0 ? globalMaxTokens : maxOutputTokens),
+			stop: Array.isArray(override.stop) && override.stop.length > 0 ? override.stop : undefined,
+			extraBody:
+				override.extraBody && Object.keys(override.extraBody).length > 0
+					? override.extraBody
+					: undefined,
+			requestHeaders: override.requestHeaders ?? {},
+		};
+	});
+}
+
+/** 全部 Key 的全部模型（跨 Key 展平） */
+export function resolveAllModels(
+	pricing: PricingSnapshot | undefined,
+	settings: KeySetting[] = getKeySettings(),
+): ResolvedModel[] {
+	return resolveKeys(settings).flatMap((key) => resolveModelsForKey(key, pricing));
 }
 
 function normalizeThinking(thinking: ThinkingConfig | undefined): ThinkingConfig | undefined {
@@ -118,3 +169,4 @@ function positive(value: number | undefined): number | undefined {
 function numberOrUndefined(value: number | undefined): number | undefined {
 	return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
+

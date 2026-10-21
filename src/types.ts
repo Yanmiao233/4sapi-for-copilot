@@ -56,11 +56,84 @@ export interface ModelSetting {
 	requestHeaders?: Record<string, string>;
 }
 
+/** settings.json 中单个模型的参数覆盖（Key 驱动生成后的微调） */
+export type ModelOverride = Omit<ModelSetting, 'id'>;
+
+/**
+ * settings.json 中的 API Key 元数据。
+ * Key 明文只存 SecretStorage（键名 `4sapi-copilot.key.<id>`），此处不含任何机密。
+ */
+export interface KeySetting {
+	/** 稳定 ID，用于拼接 SecretStorage 键名与模型选择器 ID */
+	id: string;
+	/** 用户可读别名（默认取分组名） */
+	alias?: string;
+	enabled?: boolean;
+	/** 该 Key 绑定的 4SAPI 分组（创建 Key 时选定，一个 Key 固定一个分组） */
+	group?: string;
+	/** 分组倍率，来自 `/api/pricing` 的 `group_ratio` */
+	groupRatio?: number;
+	/** 暴露到 Copilot 模型选择器的模型名列表 */
+	models?: string[];
+	/** 逐模型参数覆盖（可选，缺省时按 /api/pricing 推导） */
+	modelOverrides?: Record<string, ModelOverride>;
+}
+
+/** 解析完默认值后的 Key 定义 */
+export interface ResolvedKey {
+	id: string;
+	alias: string;
+	group: string;
+	groupRatio: number | undefined;
+	models: string[];
+	modelOverrides: Record<string, ModelOverride>;
+}
+
+// ---- /api/pricing（公开倍率表） ----
+
+export interface PricingModelEntry {
+	modelName: string;
+	modelRatio: number;
+	completionRatio: number;
+	modelPrice: number;
+	quotaType: number;
+	/** 该模型可用的分组 */
+	enableGroups: string[];
+	tags: string[];
+	supportedEndpoints: string[];
+	vendorId: number;
+	description: string;
+}
+
+export interface PricingSnapshot {
+	/** 服务端倍率表版本号，用于判断是否需要刷新 */
+	version: string;
+	/** 本地抓取时间（毫秒） */
+	fetchedAt: number;
+	/** 分组 → 倍率 */
+	groupRatio: Record<string, number>;
+	/** 分组 → 说明（`usable_group`，即真实可选分组） */
+	groups: Record<string, string>;
+	/** 厂商 id → 名称 */
+	vendors: Record<number, string>;
+	/** 模型 id → 条目 */
+	models: Record<string, PricingModelEntry>;
+}
+
 /** 解析完默认值后的内部模型定义 */
 export interface ResolvedModel {
+	/** 模型选择器中的唯一 ID（含 Key 维度，避免同名模型冲突） */
 	id: string;
+	/** 实际发送给 4SAPI 的模型名 */
 	apiModelId: string;
+	/** 选择器中的显示名（含分组与消耗倍率） */
 	name: string;
+	/** 所属 Key */
+	keyId: string;
+	keyAlias: string;
+	/** 所属分组与消耗倍率 */
+	group: string;
+	groupRatio: number | undefined;
 	family: string;
 	version: string;
 	detail: string;

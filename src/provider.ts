@@ -1,14 +1,15 @@
 import vscode from 'vscode';
-import { AuthManager } from './auth';
 import { ApiClient, ApiRequestError } from './client';
 import {
 	getBaseUrl,
 	getDebugMode,
 	getGlobalTemperature,
 	getGlobalTopP,
+	getKeySettings,
 	getRequestHeaders,
 	getUsageReportingEnabled,
-	resolveModels,
+	resolveKeys,
+	resolveModelsForKey,
 } from './config';
 import { countMessageChars, convertMessages, convertTools } from './convert';
 import { logger, setLogLevel } from './logger';
@@ -20,9 +21,10 @@ import {
 	mergeExtraBody,
 	toChatInfo,
 	type ModelConfigurationOptions,
-	type ModelPickerChatInformation,
 } from './models';
-import type { ChatRequest, ChatUsage, ResolvedModel } from './types';
+import type { PricingStore } from './pricingStore';
+import type { ChatRequest, ChatUsage, ResolvedKey, ResolvedModel } from './types';
+import type { KeyVault } from './vault';
 
 const COPILOT_USAGE_DATA_PART_MIME = 'usage';
 
@@ -36,10 +38,13 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 
 	/** 自适应 chars/token 比，用 API 上报的真实 token 数持续校准 */
 	private charsPerToken = 4.0;
+	/** 上次渲染模型列表时使用的倍率表版本，用于避免重复刷新选择器 */
+	private renderedPricingVersion: string | undefined;
 
 	constructor(
-		private readonly context: vscode.ExtensionContext,
-		private readonly auth: AuthManager,
+		context: vscode.ExtensionContext,
+		private readonly vault: KeyVault,
+		private readonly pricing: PricingStore,
 	) {
 		context.subscriptions.push(
 			this.onDidChangeEmitter,
@@ -49,9 +54,9 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 					this.refreshModelPicker();
 				}
 			}),
-			// 多窗口：密钥库变化不会触发 onDidChangeConfiguration
+			// 多窗口 / 外部改密钥库时不会触发 onDidChangeConfiguration
 			context.secrets.onDidChange((event) => {
-				if (event.key === '4sapi-copilot.apiKey') {
+				if (event.key.startsWith('4sapi-copilot.')) {
 					this.refreshModelPicker();
 				}
 			}),
@@ -69,8 +74,24 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 		_options: vscode.PrepareLanguageModelChatModelOptions,
 		_token: vscode.CancellationToken,
 	): Promise<vscode.LanguageModelChatInformation[]> {
-		const hasKey = await this.auth.hasApiKey();
-		return resolveModels().map((model) => toChatInfo(model, hasKey));
+		const snapshot = this.pricing.get();
+		this.renderedPricingVersion = snapshot?.version;
+		// 倍率表过期时后台刷新；版本变化后自动再刷新一次选择器，让显示倍率跟上
+		void this.pricing.ensure(getBaseUrl()).then((fresh) => {
+			if (fresh && fresh.version !== this.renderedPricingVersion) {
+				this.refreshModelPicker();
+			}
+		});
+
+		const keys = resolveKeys(getKeySettings());
+		const infos: vscode.LanguageModelChatInformation[] = [];
+		for (const key of keys) {
+			const hasKey = await this.vault.hasApiKey(key.id);
+			for (const model of resolveModelsForKey(key, snapshot)) {
+				infos.push(toChatInfo(model, hasKey));
+			}
+		}
+		return infos;
 	}
 
 	async provideLanguageModelChatResponse(
@@ -82,9 +103,11 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 	): Promise<void> {
 		const started = Date.now();
 		const model = this.resolveRequestedModel(modelInfo);
-		const apiKey = await this.auth.getApiKey();
+		const apiKey = await this.vault.getApiKey(model.keyId);
 		if (!apiKey) {
-			throw new ApiRequestError('未配置 4SAPI API Key，请运行命令「4SAPI: 设置 API Key」。');
+			throw new ApiRequestError(
+				`Key「${model.keyAlias}」尚未配置密钥，请运行命令「4SAPI: 添加 API Key」。`,
+			);
 		}
 
 		const headers = { ...getRequestHeaders(), ...model.requestHeaders };
@@ -94,6 +117,8 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 		const requestChars = countMessageChars(request.messages);
 		logger.info(
 			`请求 → ${model.apiModelId}`,
+			`Key=${model.keyAlias}`,
+			`分组=${model.group}(${model.groupRatio ?? '?'}x)`,
 			`思考=${model.thinking ? String(request.reasoning_effort ?? request.thinking?.type ?? 'none') : 'n/a'}`,
 			`max_tokens=${String(request.max_tokens ?? 'default')}`,
 			`消息数=${request.messages.length}`,
@@ -168,16 +193,28 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 	// ---- 内部 ----
 
 	private resolveRequestedModel(modelInfo: vscode.LanguageModelChatInformation): ResolvedModel {
-		const models = resolveModels();
-		const found = models.find((model) => model.id === modelInfo.id);
-		if (found) {
-			return found;
+		const snapshot = this.pricing.get();
+		for (const key of resolveKeys(getKeySettings())) {
+			const found = resolveModelsForKey(key, snapshot).find((model) => model.id === modelInfo.id);
+			if (found) {
+				return found;
+			}
 		}
-		// 信息未刷新时的兜底：仅按 id 构造
+		// 信息未刷新时的兜底：按选择器 ID 的 `<keyId>/<modelId>` 结构还原
+		const separator = modelInfo.id.indexOf('/');
+		const keyId = separator > 0 ? modelInfo.id.slice(0, separator) : '';
+		const modelId = separator > 0 ? modelInfo.id.slice(separator + 1) : modelInfo.id;
+		const key: ResolvedKey | undefined = resolveKeys(getKeySettings()).find(
+			(item) => item.id === keyId,
+		);
 		return {
 			id: modelInfo.id,
-			apiModelId: modelInfo.id,
+			apiModelId: modelId,
 			name: modelInfo.name,
+			keyId,
+			keyAlias: key?.alias ?? keyId,
+			group: key?.group ?? '',
+			groupRatio: key?.groupRatio,
 			family: modelInfo.family ?? '4sapi',
 			version: modelInfo.version ?? '',
 			detail: modelInfo.detail ?? '',

@@ -28,10 +28,10 @@ export function toChatInfo(model: ResolvedModel, hasApiKey: boolean): ModelPicke
 		name: model.name,
 		family: model.family,
 		version: model.version,
-		detail: hasApiKey ? model.detail : '需要先配置 4SAPI API Key',
+		detail: hasApiKey ? model.detail : '需要先为所属 API Key 配置密钥',
 		tooltip: hasApiKey
 			? `${model.detail}\n上下文长度: ${model.maxInputTokens.toLocaleString()} · 最大输出: ${model.maxOutputTokens.toLocaleString()}`
-			: '运行命令「4SAPI: 设置 API Key」',
+			: `运行命令「4SAPI: 添加 API Key」配置 ${model.keyAlias} 的密钥`,
 		maxInputTokens: model.maxInputTokens,
 		maxOutputTokens: model.maxOutputTokens,
 		capabilities: {

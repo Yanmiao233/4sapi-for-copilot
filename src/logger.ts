@@ -2,6 +2,9 @@ import vscode from 'vscode';
 
 export type LogLevel = 'minimal' | 'metadata' | 'verbose';
 
+/** 输出通道名称（用户可在「输出」面板的下拉框中看到） */
+export const CHANNEL_NAME = '4SAPI';
+
 let channel: vscode.OutputChannel | undefined;
 let level: LogLevel = 'minimal';
 
@@ -21,8 +24,22 @@ export function getLogLevel(): LogLevel {
 	return level;
 }
 
-export function showLogs(): void {
-	channel?.show(true);
+/**
+ * 把输出面板切到本扩展的通道。
+ * 通道是懒创建的 —— 即使 `initLogger` 因故没跑，这里也会补上，
+ * 避免命令执行成功却「什么都没发生」。
+ */
+export function showLogs(preserveFocus = true): boolean {
+	if (!channel) {
+		channel = vscode.window.createOutputChannel(CHANNEL_NAME);
+	}
+	channel.show(preserveFocus);
+	return true;
+}
+
+/** 无论当前日志级别都立即输出（用于用户主动触发的诊断信息） */
+export function logLine(kind: string, message: string, ...rest: unknown[]): void {
+	write(kind, message, rest);
 }
 
 export const logger = {
@@ -65,6 +82,7 @@ function write(kind: string, message: string, rest: unknown[]): void {
 				return String(item);
 			}
 		})
+		.filter((item) => item.length > 0)
 		.join(' ');
 	channel.appendLine(`[${time}] ${kind.padEnd(5)} ${message}${suffix ? ` ${suffix}` : ''}`);
 }

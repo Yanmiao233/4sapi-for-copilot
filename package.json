@@ -1,13 +1,13 @@
 {
   "name": "4sapi-for-copilot",
   "displayName": "4SAPI for Copilot Chat",
-  "description": "把 4SAPI 聚合 API 的模型（GPT / Claude / Gemini / DeepSeek 等）接入 GitHub Copilot Chat 模型选择器，每个模型的上下文长度、最大输出、思考深度、采样参数均可独立配置。",
-  "version": "0.1.0",
+  "description": "把 4SAPI 聚合 API 的模型（GPT / Claude / Gemini / DeepSeek 等）接入 GitHub Copilot Chat 模型选择器。支持多 API Key：每个 Key 绑定一个 4SAPI 分组，可用模型由该分组决定，模型名上直接显示消耗倍率（0.8x / 1x / 5x…），各模型的上下文长度、最大输出、思考深度、采样参数均可独立配置。",
+  "version": "0.2.2",
   "publisher": "Yanmiao233",
   "license": "MIT",
   "repository": {
-  "type": "git",
-  "url": "https://github.com/Yanmiao233/4sapi-for-copilot"
+    "type": "git",
+    "url": "https://github.com/Yanmiao233/4sapi-for-copilot"
   },
   "engines": {
     "vscode": "^1.116.0",
@@ -25,6 +25,7 @@
     "byok",
     "language model",
     "openai compatible",
+    "multi key",
     "thinking",
     "reasoning"
   ],
@@ -41,20 +42,28 @@
     ],
     "commands": [
       {
-        "command": "4sapi-copilot.setApiKey",
-        "title": "4SAPI: 设置 API Key"
+        "command": "4sapi-copilot.addKey",
+        "title": "4SAPI: 添加 API Key"
       },
       {
-        "command": "4sapi-copilot.clearApiKey",
-        "title": "4SAPI: 清除 API Key"
+        "command": "4sapi-copilot.removeKey",
+        "title": "4SAPI: 删除 API Key"
+      },
+      {
+        "command": "4sapi-copilot.editKeyModels",
+        "title": "4SAPI: 编辑 Key 的模型列表"
+      },
+      {
+        "command": "4sapi-copilot.renameKey",
+        "title": "4SAPI: 重命名 Key"
+      },
+      {
+        "command": "4sapi-copilot.refreshPricing",
+        "title": "4SAPI: 刷新分组倍率表"
       },
       {
         "command": "4sapi-copilot.testConnection",
         "title": "4SAPI: 测试连接"
-      },
-      {
-        "command": "4sapi-copilot.fetchModels",
-        "title": "4SAPI: 从服务器拉取模型列表并生成配置"
       },
       {
         "command": "4sapi-copilot.reloadModels",
@@ -67,6 +76,10 @@
       {
         "command": "4sapi-copilot.showLogs",
         "title": "4SAPI: 显示日志"
+      },
+      {
+        "command": "4sapi-copilot.diagnostics",
+        "title": "4SAPI: 诊断信息"
       }
     ],
     "configuration": {
@@ -83,10 +96,178 @@
           ],
           "markdownDescription": "4SAPI 接入地址（`/v1` 结尾，OpenAI 兼容）。海外网络用 `4sapi.com`；国内直连用 `4sapi.org` / `4sapi.top` / `4stoken.com`。"
         },
-        "4sapi-copilot.apiKey": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "4SAPI API Key 的**后备**存放处（明文写入 settings.json，不推荐）。推荐使用命令 `4SAPI: 设置 API Key` 存入系统密钥库（SecretStorage）。两者都配置时优先使用密钥库。"
+        "4sapi-copilot.keys": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "已配置的 4SAPI API Key 清单。**每个 Key 对应 4SAPI 控制台中按某个分组创建的一个 Key**，该 Key 能调用哪些模型由这个分组决定；模型消耗倍率显示在模型名里（如 `claude-sonnet-4-6 (5x, claude-官方)`），所以不同分组下的同名模型不会冲突。API Key 明文保存在系统密钥库（SecretStorage），此处不含任何机密。推荐用命令 `4SAPI: 添加 API Key` 添加（自动推断分组并勾选模型）。",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "内部唯一 ID（自动生成，用于拼接密钥键名与模型选择器 ID，请勿修改）。"
+              },
+              "alias": {
+                "type": "string",
+                "description": "Key 的显示别名，默认取分组名，会出现在模型描述中。"
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true,
+                "description": "是否启用该 Key；关闭后其全部模型会从模型选择器中移除。"
+              },
+              "group": {
+                "type": "string",
+                "description": "该 Key 绑定的 4SAPI 分组（创建 Key 时选定的那个分组）。"
+              },
+              "groupRatio": {
+                "type": "number",
+                "description": "分组消耗倍率，取自 4SAPI 公开倍率表 /api/pricing，仅用于显示；可用命令「4SAPI: 刷新分组倍率表」更新。"
+              },
+              "models": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "暴露到 Copilot 模型选择器的模型名清单（4SAPI 的原始模型名，如 claude-sonnet-4-6）。"
+              },
+              "modelOverrides": {
+                "type": "object",
+                "markdownDescription": "逐模型参数覆盖（键为模型名）。缺省时按 /api/pricing 的元数据（上下文规格标签、模型族）自动推导，这里只需填写要调整的字段。",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "apiModelId": {
+                      "type": "string",
+                      "description": "实际发送给 4SAPI 的模型名（缺省时与模型名相同）。"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "模型选择器中的显示名（缺省时自动生成「模型名 (倍率, 分组)」）。"
+                    },
+                    "family": {
+                      "type": "string",
+                      "description": "模型族（用于分组），如 gpt / claude / gemini / deepseek。"
+                    },
+                    "version": {
+                      "type": "string",
+                      "description": "版本号，仅用于展示。"
+                    },
+                    "detail": {
+                      "type": "string",
+                      "description": "模型选择器中的补充描述。"
+                    },
+                    "contextWindow": {
+                      "type": "number",
+                      "description": "模型完整上下文窗口（输入+输出）。设置了它且未设置 maxInputTokens 时，maxInputTokens = contextWindow - maxOutputTokens。"
+                    },
+                    "maxInputTokens": {
+                      "type": "number",
+                      "description": "上下文长度（最大输入 token 数）。Copilot 按它管理上下文预算与裁剪。"
+                    },
+                    "maxOutputTokens": {
+                      "type": "number",
+                      "description": "最大输出 token 数。"
+                    },
+                    "toolCalling": {
+                      "type": "boolean",
+                      "description": "是否支持工具调用（Agent 模式必需；不支持的模型不会出现在 Agent 会话的模型选择器里）。"
+                    },
+                    "imageInput": {
+                      "type": "boolean",
+                      "description": "是否支持图片输入（视觉）。"
+                    },
+                    "temperature": {
+                      "type": "number",
+                      "description": "该模型的采样温度，覆盖全局 temperature。-1 表示不发送。"
+                    },
+                    "topP": {
+                      "type": "number",
+                      "description": "该模型的 top_p，覆盖全局 topP。-1 表示不发送。"
+                    },
+                    "maxTokens": {
+                      "type": "number",
+                      "description": "该模型请求体中 max_tokens 的值。缺省时取 maxOutputTokens（或全局 maxTokens 上限）。"
+                    },
+                    "stop": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "停止序列。"
+                    },
+                    "extraBody": {
+                      "type": "object",
+                      "description": "合并进该模型请求体的额外参数（最后合并，可覆盖生成的字段）。"
+                    },
+                    "requestHeaders": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "该模型专属的附加 HTTP 头，覆盖全局 requestHeaders 中的同名项。"
+                    },
+                    "thinking": {
+                      "type": "object",
+                      "description": "思考（推理）能力与深度配置。默认按模型族自动推导。",
+                      "properties": {
+                        "style": {
+                          "type": "string",
+                          "enum": [
+                            "none",
+                            "openai",
+                            "deepseek",
+                            "anthropic",
+                            "custom"
+                          ],
+                          "default": "none",
+                          "enumDescriptions": [
+                            "不支持思考",
+                            "OpenAI 风格：顶层 reasoning_effort",
+                            "DeepSeek 风格：thinking:{type} + reasoning_effort，流式 reasoning_content",
+                            "Anthropic 风格：thinking:{type,budget_tokens}",
+                            "自定义：仅合并 extraBody，支持 {{effort}} 占位符"
+                          ],
+                          "description": "思考参数映射协议。"
+                        },
+                        "supportedEfforts": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "支持的思考深度档位，如 [\"minimal\",\"low\",\"medium\",\"high\"] 或 [\"low\",\"high\",\"max\"]。设置后模型选择器出现「思考深度」下拉框。"
+                        },
+                        "defaultEffort": {
+                          "type": "string",
+                          "description": "默认思考深度。"
+                        },
+                        "canDisable": {
+                          "type": "boolean",
+                          "default": true,
+                          "description": "是否允许把思考深度设为 none（完全关闭思考）。"
+                        },
+                        "budgetTokens": {
+                          "type": "number",
+                          "description": "anthropic 风格的默认思考预算（budget_tokens）。"
+                        },
+                        "effortBudgets": {
+                          "type": "object",
+                          "description": "anthropic 风格：思考深度 → budget_tokens 映射，如 {\"low\":4096,\"high\":16384}。"
+                        },
+                        "extraBody": {
+                          "type": "object",
+                          "description": "合并进请求体的额外参数。字符串值中的 {{effort}} 会被替换为当前思考深度。"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         },
         "4sapi-copilot.requestHeaders": {
           "type": "object",
@@ -127,252 +308,10 @@
           ],
           "enumDescriptions": [
             "只记录错误",
-            "记录请求元信息（模型、思考深度、token 数、耗时）",
+            "记录请求元信息（Key、分组、模型、思考深度、token 数、耗时）",
             "元信息 + 请求/响应体摘要（注意可能包含代码片段）"
           ],
           "markdownDescription": "日志级别，输出到 `4SAPI` 输出通道。"
-        },
-        "4sapi-copilot.models": {
-          "type": "array",
-          "default": [
-            {
-              "id": "gpt-5.5",
-              "name": "GPT-5.5 (4SAPI)",
-              "family": "gpt",
-              "version": "5.5",
-              "detail": "OpenAI 旗舰 · 思考深度可调",
-              "maxInputTokens": 200000,
-              "maxOutputTokens": 64000,
-              "toolCalling": true,
-              "imageInput": true,
-              "thinking": {
-                "style": "openai",
-                "supportedEfforts": ["minimal", "low", "medium", "high"],
-                "defaultEffort": "medium",
-                "canDisable": true
-              }
-            },
-            {
-              "id": "claude-sonnet-4-6",
-              "name": "Claude Sonnet 4.6 (4SAPI)",
-              "family": "claude",
-              "version": "4.6",
-              "detail": "Anthropic · 思考预算可调",
-              "maxInputTokens": 200000,
-              "maxOutputTokens": 64000,
-              "toolCalling": true,
-              "imageInput": true,
-              "thinking": {
-                "style": "anthropic",
-                "supportedEfforts": ["low", "medium", "high", "max"],
-                "defaultEffort": "high",
-                "canDisable": true,
-                "effortBudgets": {
-                  "low": 4096,
-                  "medium": 8192,
-                  "high": 16384,
-                  "max": 32768
-                }
-              }
-            },
-            {
-              "id": "deepseek-v4-pro",
-              "name": "DeepSeek V4 Pro (4SAPI)",
-              "family": "deepseek",
-              "version": "v4",
-              "detail": "深度思考 · reasoning_content 流式渲染",
-              "maxInputTokens": 655360,
-              "maxOutputTokens": 393216,
-              "toolCalling": true,
-              "imageInput": false,
-              "thinking": {
-                "style": "deepseek",
-                "supportedEfforts": ["low", "high", "max"],
-                "defaultEffort": "high",
-                "canDisable": true
-              }
-            },
-            {
-              "id": "deepseek-v4-flash",
-              "name": "DeepSeek V4 Flash (4SAPI)",
-              "family": "deepseek",
-              "version": "v4",
-              "detail": "高性价比 · 思考模式可关",
-              "maxInputTokens": 655360,
-              "maxOutputTokens": 393216,
-              "toolCalling": true,
-              "imageInput": false,
-              "thinking": {
-                "style": "deepseek",
-                "supportedEfforts": ["low", "high", "max"],
-                "defaultEffort": "high",
-                "canDisable": true
-              }
-            },
-            {
-              "id": "gemini-2.5-pro",
-              "name": "Gemini 2.5 Pro (4SAPI)",
-              "family": "gemini",
-              "version": "2.5",
-              "detail": "百万级上下文",
-              "maxInputTokens": 1048576,
-              "maxOutputTokens": 65536,
-              "toolCalling": true,
-              "imageInput": true,
-              "thinking": {
-                "style": "custom",
-                "supportedEfforts": ["low", "medium", "high"],
-                "defaultEffort": "medium",
-                "canDisable": true,
-                "extraBody": {
-                  "reasoning_effort": "{{effort}}"
-                }
-              }
-            }
-          ],
-          "markdownDescription": "暴露到 Copilot Chat 模型选择器的模型清单。**每个模型的参数（上下文长度 `maxInputTokens`、最大输出 `maxOutputTokens`、思考深度 `thinking`、采样参数等）独立配置**。默认条目仅为示例，请以 4SAPI 控制台实际模型名为准（可用命令 `4SAPI: 从服务器拉取模型列表并生成配置` 自动生成）。",
-          "items": {
-            "type": "object",
-            "required": [
-              "id"
-            ],
-            "properties": {
-              "id": {
-                "type": "string",
-                "description": "VS Code 模型选择器中的唯一 ID（也作为未配置 apiModelId 时发给 4SAPI 的模型名）。"
-              },
-              "apiModelId": {
-                "type": "string",
-                "description": "实际发送给 4SAPI 的模型名。缺省时与 id 相同。"
-              },
-              "name": {
-                "type": "string",
-                "description": "模型选择器中显示的名称。"
-              },
-              "family": {
-                "type": "string",
-                "description": "模型族（用于分组），如 gpt / claude / gemini / deepseek。"
-              },
-              "version": {
-                "type": "string",
-                "description": "版本号，仅用于展示。"
-              },
-              "detail": {
-                "type": "string",
-                "description": "模型选择器中的补充描述。"
-              },
-              "enabled": {
-                "type": "boolean",
-                "default": true,
-                "description": "是否暴露到模型选择器。"
-              },
-              "contextWindow": {
-                "type": "number",
-                "description": "模型完整上下文窗口（输入+输出）。设置了它且未设置 maxInputTokens 时，maxInputTokens = contextWindow - maxOutputTokens。"
-              },
-              "maxInputTokens": {
-                "type": "number",
-                "description": "上下文长度（最大输入 token 数）。Copilot 按它管理上下文预算与裁剪。"
-              },
-              "maxOutputTokens": {
-                "type": "number",
-                "description": "最大输出 token 数。"
-              },
-              "toolCalling": {
-                "type": "boolean",
-                "default": true,
-                "description": "是否支持工具调用（Agent 模式必需；不支持的模型不会出现在 Agent 会话的模型选择器里）。"
-              },
-              "imageInput": {
-                "type": "boolean",
-                "default": false,
-                "description": "是否支持图片输入（视觉）。"
-              },
-              "thinking": {
-                "type": "object",
-                "description": "思考（推理）能力与深度配置。",
-                "properties": {
-                  "style": {
-                    "type": "string",
-                    "enum": [
-                      "none",
-                      "openai",
-                      "deepseek",
-                      "anthropic",
-                      "custom"
-                    ],
-                    "default": "none",
-                    "enumDescriptions": [
-                      "不支持思考",
-                      "OpenAI 风格：顶层 reasoning_effort",
-                      "DeepSeek 风格：thinking:{type} + reasoning_effort，流式 reasoning_content",
-                      "Anthropic 风格：thinking:{type,budget_tokens}",
-                      "自定义：仅合并 extraBody，支持 {{effort}} 占位符"
-                    ],
-                    "description": "思考参数映射协议。"
-                  },
-                  "supportedEfforts": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    },
-                    "description": "支持的思考深度档位，如 [\"minimal\",\"low\",\"medium\",\"high\"] 或 [\"low\",\"high\",\"max\"]。设置后模型选择器出现「思考深度」下拉框。"
-                  },
-                  "defaultEffort": {
-                    "type": "string",
-                    "description": "默认思考深度。"
-                  },
-                  "canDisable": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "是否允许把思考深度设为 none（完全关闭思考）。"
-                  },
-                  "budgetTokens": {
-                    "type": "number",
-                    "description": "anthropic 风格的默认思考预算（budget_tokens）。"
-                  },
-                  "effortBudgets": {
-                    "type": "object",
-                    "description": "anthropic 风格：思考深度 → budget_tokens 映射，如 {\"low\":4096,\"high\":16384}。"
-                  },
-                  "extraBody": {
-                    "type": "object",
-                    "description": "合并进请求体的额外参数。字符串值中的 {{effort}} 会被替换为当前思考深度。"
-                  }
-                }
-              },
-              "temperature": {
-                "type": "number",
-                "description": "该模型的采样温度，覆盖全局 temperature。-1 表示不发送。"
-              },
-              "topP": {
-                "type": "number",
-                "description": "该模型的 top_p，覆盖全局 topP。-1 表示不发送。"
-              },
-              "maxTokens": {
-                "type": "number",
-                "description": "该模型请求体中 max_tokens 的值。缺省时取 maxOutputTokens（或全局 maxTokens 上限）。"
-              },
-              "stop": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "停止序列。"
-              },
-              "extraBody": {
-                "type": "object",
-                "description": "合并进该模型请求体的额外参数（最后合并，可覆盖生成的字段）。"
-              },
-              "requestHeaders": {
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "description": "该模型专属的附加 HTTP 头，覆盖全局 requestHeaders 中的同名项。"
-              }
-            }
-          }
         }
       }
     }
@@ -386,6 +325,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.116.0",
+    "@vscode/vsce": "^4.0.0",
     "typescript": "^5.6.0"
   }
 }
