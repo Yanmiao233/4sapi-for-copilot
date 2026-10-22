@@ -2,7 +2,7 @@
   "name": "4sapi-for-copilot",
   "displayName": "4SAPI for Copilot Chat",
   "description": "把 4SAPI 聚合 API 的模型（GPT / Claude / Gemini / DeepSeek 等）接入 GitHub Copilot Chat 模型选择器。支持多 API Key：每个 Key 绑定一个 4SAPI 分组，可用模型由该分组决定，模型名上直接显示消耗倍率（0.8x / 1x / 5x…），各模型的上下文长度、最大输出、思考深度、采样参数均可独立配置。",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "Yanmiao233",
   "license": "MIT",
   "repository": {

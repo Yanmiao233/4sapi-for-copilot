@@ -253,6 +253,38 @@ export interface LoadPricingResult {
 	error?: string;
 }
 
+/**
+ * 倍率表内容签名（版本号 + 模型集合 + 分组倍率集合）。
+ * **不能只用 `pricing_version` 判断是否变化**：4SAPI 会在版本号不变的情况下
+ * 增删模型（实测新增 `deepseek-v4.1-flash-1017`、移除 `gpt-5.4-pro`，版本号纹丝不动）。
+ * 只比版本号会导致新模型永远进不了缓存，进而回退到模型族默认上下文（严重偏小）。
+ */
+export function pricingSignature(snapshot: PricingSnapshot): string {
+	const models = Object.keys(snapshot.models).sort();
+	const groups = Object.keys(snapshot.groupRatio).sort();
+
+	// FNV-1a 32 位，足够做变更检测且不引入依赖
+	let hash = 0x811c9dc5;
+	const feed = (text: string): void => {
+		for (let index = 0; index < text.length; index++) {
+			hash ^= text.charCodeAt(index);
+			hash = Math.imul(hash, 0x01000193);
+		}
+	};
+	for (const model of models) {
+		feed(model);
+		feed('\n');
+	}
+	for (const group of groups) {
+		feed(group);
+		feed('=');
+		feed(String(snapshot.groupRatio[group]));
+		feed('\n');
+	}
+
+	return `${snapshot.version}:${models.length}:${(hash >>> 0).toString(16)}`;
+}
+
 export async function loadPricing(
 	baseUrl: string,
 	readCache: () => PricingSnapshot | undefined,
@@ -269,7 +301,8 @@ export async function loadPricing(
 
 	try {
 		const snapshot = await fetchPricing(baseUrl);
-		if (cached && snapshot.version && snapshot.version === cached.version) {
+		// 内容完全一致时沿用缓存（保留原 fetchedAt，避免无谓写入）
+		if (cached && pricingSignature(snapshot) === pricingSignature(cached)) {
 			return { snapshot: cached };
 		}
 		await writeCache(snapshot);

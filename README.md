@@ -94,7 +94,52 @@ code --install-extension 4sapi-for-copilot-0.2.0.vsix
 
 ### `keys[].modelOverrides[模型名]`
 
-**全部字段都可省略**——缺省时按 `/api/pricing` 的元数据自动推导（`tags` 里的 `1M` / `200K` 等规格标签 → 完整上下文窗口，输入上限 = 窗口 − 最大输出；`vendor_id` → 供应商；模型名 → 模型族与思考协议）。只需填写要调整的字段：
+**全部字段都可省略**——缺省时按 `/api/pricing` 的元数据自动推导，只需填写要调整的字段。
+
+#### 上下文长度是怎么来的
+
+扩展**不请求模型详情接口**，而是读 4SAPI 的公开倍率表 `GET /api/pricing`，逐项推导：
+
+| 参数 | 来源 | 例子 |
+|---|---|---|
+| 完整窗口 `contextWindow` | 该模型 `tags` 里的规格标签（`1M` / `400K` / `200K` / `128K`） | `deepseek-v4.1-flash-1017` 的 tags = `1M,多模态,文本` → **1048576** |
+| 最大输出 `maxOutputTokens` | 按模型族给的默认值（倍率表不提供输出上限） | deepseek 族 → 65536 |
+| 上下文长度 `maxInputTokens` | `contextWindow − maxOutputTokens`（输入上限要扣掉输出预算） | 1048576 − 65536 = **983040** |
+| 视觉 `imageInput` | `tags` 含「多模态」 | `1M,多模态,文本` → true |
+| 模型族 / 思考协议 | 模型名启发式 | 名字含 `deepseek` → `thinking.style = deepseek` |
+| 供应商 | `vendor_id` → `vendors` 表 | 11 → DeepSeek |
+
+模型**不在倍率表里**时（新上线等）退化为模型族默认值（deepseek 128K / 65536，gpt & claude 200K，gemini 1M）。倍率表有 12 小时缓存，过期自动刷新；也可用命令 `4SAPI: 刷新分组倍率表` 强制更新。
+
+> 想让「上下文长度」直接显示 1M 而不是 960K（983040），把 `maxInputTokens` 显式设成 `1048576` 即可（见下）。
+
+#### 手动覆盖
+
+在 settings.json 里定位到对应的 Key 条目，添加 `modelOverrides`：
+
+```jsonc
+"4sapi-copilot.keys": [
+  {
+    "id": "key-mvjbz3a9-m0ydwp",
+    "alias": "国产全模型",
+    "group": "国产全模型",
+    "models": ["deepseek-v4.1-flash-1017"],
+    "modelOverrides": {
+      "deepseek-v4.1-flash-1017": {
+        "maxInputTokens": 1048576,   // 上下文长度（优先于 contextWindow 推导）
+        "maxOutputTokens": 65536,    // 最大输出
+        // 也可用 "contextWindow": 1048576 让它自动减去 maxOutputTokens
+      }
+    }
+  }
+]
+```
+
+**优先级**：`modelOverrides.<模型名>.maxInputTokens` > `contextWindow − maxOutputTokens` > `tags` 规格标签推导 > 模型族默认值。
+
+改完执行 `4SAPI: 重新加载模型列表`（或重启 VS Code）即可生效；`4SAPI: 诊断信息` 可查看当前生效值。
+
+#### 全部可覆盖字段
 
 | 字段 | 自动推导值 | 说明 |
 |---|---|---|
@@ -103,7 +148,7 @@ code --install-extension 4sapi-for-copilot-0.2.0.vsix
 | `family` / `version` / `detail` | 按模型族 | 展示信息（`family` 用于分组） |
 | `contextWindow` | `tags` 规格标签 | 完整窗口（输入+输出） |
 | `maxInputTokens` | `contextWindow − maxOutputTokens` | **上下文长度**（Copilot 据此管理上下文预算） |
-| `maxOutputTokens` | 按模型族（如 Gemini 65536） | **最大输出 token** |
+| `maxOutputTokens` | 按模型族（deepseek 65536、gemini 65536） | **最大输出 token** |
 | `toolCalling` | `true` | 工具调用（Agent 模式必需） |
 | `imageInput` | `tags` 含「多模态」 | 图片输入（视觉） |
 | `thinking` | 按模型族 | 思考能力与深度，见下 |

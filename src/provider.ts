@@ -23,6 +23,7 @@ import {
 	type ModelConfigurationOptions,
 } from './models';
 import type { PricingStore } from './pricingStore';
+import { pricingSignature } from './pricing';
 import type { ChatRequest, ChatUsage, ResolvedKey, ResolvedModel } from './types';
 import type { KeyVault } from './vault';
 
@@ -38,8 +39,8 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 
 	/** 自适应 chars/token 比，用 API 上报的真实 token 数持续校准 */
 	private charsPerToken = 4.0;
-	/** 上次渲染模型列表时使用的倍率表版本，用于避免重复刷新选择器 */
-	private renderedPricingVersion: string | undefined;
+	/** 上次渲染模型列表时的倍率表内容签名，用于避免重复刷新选择器 */
+	private renderedPricingSignature: string | undefined;
 
 	constructor(
 		context: vscode.ExtensionContext,
@@ -75,10 +76,10 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 		_token: vscode.CancellationToken,
 	): Promise<vscode.LanguageModelChatInformation[]> {
 		const snapshot = this.pricing.get();
-		this.renderedPricingVersion = snapshot?.version;
-		// 倍率表过期时后台刷新；版本变化后自动再刷新一次选择器，让显示倍率跟上
+		this.renderedPricingSignature = snapshot ? pricingSignature(snapshot) : undefined;
+		// 倍率表过期时后台刷新；内容变化后自动再刷新一次选择器，让显示倍率与上下文跟上
 		void this.pricing.ensure(getBaseUrl()).then((fresh) => {
-			if (fresh && fresh.version !== this.renderedPricingVersion) {
+			if (fresh && pricingSignature(fresh) !== this.renderedPricingSignature) {
 				this.refreshModelPicker();
 			}
 		});

@@ -1,6 +1,7 @@
 import vscode from 'vscode';
 import { CONFIG_SECTION } from './consts';
 import { deriveModelDefaults } from './defaults';
+import { logger } from './logger';
 import { formatRatio, modelRatio } from './pricing';
 import type {
 	KeySetting,
@@ -87,6 +88,9 @@ export function resolveModelsForKey(
 	return key.models.map((modelId) => {
 		const override = key.modelOverrides[modelId] ?? {};
 		const defaults = deriveModelDefaults(modelId, pricing);
+		if (pricing && !pricing.models[modelId]) {
+			logger.debug('倍率表中查不到该模型，使用模型族默认参数（可手动覆盖）:', modelId);
+		}
 
 		const maxOutputTokens = positive(override.maxOutputTokens) ?? defaults.maxOutputTokens;
 		const contextWindow = positive(override.contextWindow);
