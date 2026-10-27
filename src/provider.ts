@@ -127,51 +127,86 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 		logger.debug('请求体:', safeJson(request));
 
 		let thinkingEmitted = false;
+		/** 是否已经向 UI 输出过内容（重试前必须为 false） */
+		let emitted = false;
 
-		await client.streamChatCompletion(
-			request,
-			{
-				onContent: (text: string) => {
-					progress.report(new vscode.LanguageModelTextPart(text));
+		const run = (target: ChatRequest): Promise<void> =>
+			client.streamChatCompletion(
+				target,
+				{
+					onContent: (text: string) => {
+						emitted = true;
+						progress.report(new vscode.LanguageModelTextPart(text));
+					},
+					onThinking: (text: string) => {
+						emitted = true;
+						thinkingEmitted = reportThinking(text, progress);
+					},
+					onToolCall: (call) => {
+						emitted = true;
+						try {
+							const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
+							progress.report(
+								new vscode.LanguageModelToolCallPart(call.id, call.function.name, args),
+							);
+						} catch {
+							progress.report(
+								new vscode.LanguageModelToolCallPart(call.id, call.function.name, {}),
+							);
+						}
+					},
+					onError: (error: Error) => {
+						throw error;
+					},
+					onDone: () => {
+						logger.info(
+							`响应 ← ${model.apiModelId}`,
+							`耗时=${Date.now() - started}ms`,
+							thinkingEmitted ? '含思考内容' : '',
+						);
+					},
+					onUsage: (usage: ChatUsage) => {
+						this.charsPerToken = calibrateCharsPerToken(
+							requestChars,
+							usage.prompt_tokens,
+							this.charsPerToken,
+						);
+						reportUsageToCopilot(progress, usage, getUsageReportingEnabled());
+						logger.info(
+							`用量 ${model.apiModelId}`,
+							`prompt=${usage.prompt_tokens}`,
+							`completion=${usage.completion_tokens}`,
+							`cached=${usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0}`,
+						);
+					},
 				},
-				onThinking: (text: string) => {
-					thinkingEmitted = reportThinking(text, progress);
-				},
-				onToolCall: (call) => {
-					try {
-						const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
-						progress.report(new vscode.LanguageModelToolCallPart(call.id, call.function.name, args));
-					} catch {
-						progress.report(new vscode.LanguageModelToolCallPart(call.id, call.function.name, {}));
-					}
-				},
-				onError: (error: Error) => {
-					throw error;
-				},
-				onDone: () => {
-					logger.info(
-						`响应 ← ${model.apiModelId}`,
-						`耗时=${Date.now() - started}ms`,
-						thinkingEmitted ? '含思考内容' : '',
-					);
-				},
-				onUsage: (usage: ChatUsage) => {
-					this.charsPerToken = calibrateCharsPerToken(
-						requestChars,
-						usage.prompt_tokens,
-						this.charsPerToken,
-					);
-					reportUsageToCopilot(progress, usage, getUsageReportingEnabled());
-					logger.info(
-						`用量 ${model.apiModelId}`,
-						`prompt=${usage.prompt_tokens}`,
-						`completion=${usage.completion_tokens}`,
-						`cached=${usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0}`,
-					);
-				},
-			},
-			token,
-		);
+				token,
+			);
+
+		try {
+			await run(request);
+		} catch (error) {
+			// 不同模型族接受的思考参数并不一致（例如 GLM 的 -flash 变体拒绝
+			// reasoning_effort=medium）。被服务端以 400 拒绝且尚未产生任何输出时，
+			// 去掉思考参数重试一次，避免整轮对话直接失败。
+			if (
+				emitted ||
+				!hasThinkingParams(request) ||
+				!isThinkingParamRejection(error) ||
+				token.isCancellationRequested
+			) {
+				throw error;
+			}
+			logger.warn(
+				'思考参数被服务端拒绝，去掉 reasoning_effort/thinking 后重试:',
+				model.apiModelId,
+				error instanceof Error ? error.message.slice(0, 200) : String(error),
+			);
+			const stripped: ChatRequest = { ...request };
+			delete stripped.reasoning_effort;
+			delete stripped.thinking;
+			await run(stripped);
+		}
 	}
 
 	async provideTokenCount(
@@ -324,4 +359,21 @@ function safeJson(value: unknown): string {
 	} catch {
 		return '<unserializable>';
 	}
+}
+
+function hasThinkingParams(request: ChatRequest): boolean {
+	return request.reasoning_effort !== undefined || request.thinking !== undefined;
+}
+
+/**
+ * 判断 400 是否由「思考参数不受支持」引起。
+ * 4SAPI 上游会返回类似：
+ * `The request is invalid: the request was rejected by an internal MaaS component.`
+ */
+function isThinkingParamRejection(error: unknown): boolean {
+	if (!(error instanceof ApiRequestError) || error.status !== 400) {
+		return false;
+	}
+	const message = `${error.serverMessage ?? ''} ${error.message}`;
+	return /MaaS|rejected by an internal|reasoning_effort|thinking/i.test(message);
 }

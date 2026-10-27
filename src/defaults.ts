@@ -31,6 +31,7 @@ const FAMILY_WINDOWS: Record<string, { window: number; maxOutput: number }> = {
 	gemini: { window: 1048576, maxOutput: 65536 },
 	deepseek: { window: 131072, maxOutput: 65536 },
 	qwen: { window: 131072, maxOutput: 32768 },
+	glm: { window: 131072, maxOutput: 32768 },
 	'4sapi': { window: 128000, maxOutput: 32768 },
 };
 
@@ -55,7 +56,7 @@ export function deriveModelDefaults(modelId: string, snapshot?: PricingSnapshot)
 		maxOutputTokens,
 		toolCalling: true,
 		imageInput,
-		thinking: defaultThinking(family),
+		thinking: defaultThinking(family, lower),
 		vendor,
 	};
 }
@@ -73,9 +74,11 @@ function inferFamily(lower: string): string {
 	if (lower.includes('deepseek')) {
 		return 'deepseek';
 	}
+	if (lower.includes('glm')) {
+		return 'glm';
+	}
 	if (
 		lower.includes('qwen') ||
-		lower.includes('glm') ||
 		lower.includes('kimi') ||
 		lower.includes('moonshot') ||
 		lower.includes('doubao')
@@ -85,7 +88,7 @@ function inferFamily(lower: string): string {
 	return '4sapi';
 }
 
-function defaultThinking(family: string): ThinkingConfig | undefined {
+function defaultThinking(family: string, lower: string): ThinkingConfig | undefined {
 	switch (family) {
 		case 'claude':
 			return anthropicThinking(['low', 'medium', 'high', 'max'], 'high');
@@ -95,11 +98,33 @@ function defaultThinking(family: string): ThinkingConfig | undefined {
 			return openaiThinking(['low', 'medium', 'high'], 'medium');
 		case 'deepseek':
 			return deepseekThinking(['low', 'high', 'max'], 'high');
+		case 'glm':
+			return glmThinking(lower);
 		case 'qwen':
 			return openaiThinking(['low', 'medium', 'high'], 'medium');
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * GLM 家族的思考参数并不统一（实测 4SAPI）：
+ * - `glm-5.3-flashx` / `glm-5.3-flash` 这类 -flash 变体**只接受**
+ *   `reasoning_effort ∈ {low, high, max, xhigh}`；`medium` / `minimal` / `none`
+ *   会返回 400「rejected by an internal MaaS component」，且**不能关闭思考**。
+ * - 完整版 `glm-5.3` / `glm-5.2` 接受全部档位，也能关闭。
+ * 默认档位必须落在支持集合内，否则请求直接失败。
+ */
+function glmThinking(lower: string): ThinkingConfig {
+	const isFlash = lower.includes('flash');
+	return isFlash
+		? {
+				style: 'openai',
+				supportedEfforts: ['low', 'high', 'max'],
+				defaultEffort: 'low',
+				canDisable: false,
+			}
+		: openaiThinking(['minimal', 'low', 'medium', 'high', 'max'], 'medium');
 }
 
 /** `["1M","文本","多模态"]` → `1048576`（无规格标签时为 undefined） */

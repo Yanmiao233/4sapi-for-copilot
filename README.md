@@ -21,10 +21,12 @@
 - **思考深度（Thinking Effort）**：模型选择器内实时切换档位（关闭 / 低 / 中 / 高 / 极限……档位自定义），并按模型族映射成不同的请求参数：
   | `thinking.style` | 适配模型 | 请求参数形状 |
   |---|---|---|
-  | `openai` | GPT-5.x、o 系列、Gemini（OpenAI 兼容层）、Qwen/GLM/Kimi | 顶层 `reasoning_effort` |
+  | `openai` | GPT-5.x、o 系列、Gemini（OpenAI 兼容层）、Qwen/Kimi、GLM | 顶层 `reasoning_effort` |
   | `deepseek` | DeepSeek V4 系 | `thinking:{type:enabled/disabled}` + `reasoning_effort`，流式 `reasoning_content` 渲染为可折叠思考块 |
   | `anthropic` | Claude 系 | `thinking:{type,budget_tokens}`（档位→思考预算映射） |
   | `custom` | 其它 | 仅合并 `thinking.extraBody`，支持 `{{effort}}` 占位符 |
+
+  > ⚠️ **各模型接受的档位并不相同**。实测 GLM 的 `-flash` 变体（如 `glm-5.3-flashx`）只接受 `low` / `high` / `max`，`medium`、`none` 会返回 400（"rejected by an internal MaaS component"），且无法关闭思考；完整版 `glm-5.3` / `glm-5.2` 则全部支持。插件已按模型族/变体给出安全的默认档位；若遇到其它模型报 400，插件会自动去掉思考参数重试一次并写入日志。
 - **安全**：每个 Key 的明文只存 VS Code SecretStorage（系统钥匙串），settings.json 里只有分组、别名等非机密元数据。删除 Key 会同时清理密钥库条目。添加 Key 时会立即**回读校验**，确保密钥真的写进去了才保存配置。
 - **可观测**：输出通道日志（Key / 分组 / 倍率 / 模型 / 思考深度 / 用量 / 耗时，verbose 可看请求体摘要）、token 用量上报给 Copilot、`测试连接` 命令逐个 Key 体检。
 - **零运行时依赖**：纯 VS Code API + Node 内置 fetch，无 Python / Docker / 本地代理。
@@ -240,6 +242,7 @@ code --install-extension 4sapi-for-copilot-0.2.0.vsix
 | 思考深度下拉不出现 | 该模型推导出的 `thinking` 不是 `none`（Claude / GPT / Gemini / DeepSeek / Qwen 系默认有档位） |
 | 思考内容没显示 | 当前 VS Code 不支持 `LanguageModelThinkingPart` 时会跳过渲染（日志有提示）；升级 VS Code |
 | 429 / 余额不足 | 4SAPI 控制台查看配额；`debugMode: metadata` 看请求详情（日志含 Key 别名与分组） |
+| 400 `rejected by an internal MaaS component` | 该模型不接受当前的思考参数（如 `glm-5.3-flashx` 不支持 `medium` / `none`）。0.2.4+ 已按模型给出可用档位，并会在被拒时自动去掉思考参数重试一次；日志里会记一条 `思考参数被服务端拒绝`。仍失败时在 `modelOverrides` 里把该模型的 `thinking` 设为 `{"style":"none"}`。 |
 | 「显示日志」打开是空白 | `debugMode: minimal` 时只记录错误，正常情况下只有启动横幅。要看请求详情请把 `debugMode` 设为 `metadata` / `verbose`。面板在「查看 → 输出」（`Ctrl+Shift+U`），右上角下拉框选 `4SAPI`。 |
 | 找不到日志输出在哪 | 命令 `4SAPI: 显示日志` 或 `4SAPI: 诊断信息` 会自动打开面板并切到 `4SAPI` 通道。 |
 | 密钥疑似没保存 | 运行 `4SAPI: 诊断信息`：会列出每个 Key 的密钥状态（已存 ✓ / 缺失 ✗）与密钥库条目。添加 Key 时会立即回读校验，写入失败会明确报错并**不留下坏配置**。 |
