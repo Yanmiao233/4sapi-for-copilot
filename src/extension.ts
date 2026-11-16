@@ -17,6 +17,7 @@ import { formatRatio, isChatModel, listGroups } from './pricing';
 import { PricingStore } from './pricingStore';
 import { FourSapiChatProvider } from './provider';
 import type { KeySetting, ModelSetting } from './types';
+import { formatHitRate, formatTokens, UsageStats } from './usage';
 import { KeyVault } from './vault';
 
 /** settings.json 配置数据的当前版本（用于一次性迁移旧结构） */
@@ -28,7 +29,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	const vault = new KeyVault(context.secrets);
 	const pricing = new PricingStore(context.globalState);
-	const provider = new FourSapiChatProvider(context, vault, pricing);
+	const usageStats = new UsageStats(() => getShowUsageStatusBar());
+	const provider = new FourSapiChatProvider(context, vault, pricing, usageStats);
 	const deps: KeyCommandDeps = {
 		vault,
 		pricing,
@@ -36,6 +38,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 
 	context.subscriptions.push(
+		usageStats,
 		vscode.lm.registerLanguageModelChatProvider('4sapi', provider),
 		vscode.commands.registerCommand('4sapi-copilot.addKey', () => addKey(deps)),
 		vscode.commands.registerCommand('4sapi-copilot.removeKey', () => removeKey(deps)),
@@ -63,10 +66,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			showLogs(false);
 		}),
 		vscode.commands.registerCommand('4sapi-copilot.diagnostics', () => showDiagnostics(deps)),
+		vscode.commands.registerCommand('4sapi-copilot.showUsageStats', () =>
+			showUsageStats(usageStats),
+		),
 	);
 
 	await migrateLegacyConfig(context, vault, pricing);
 	await vault.pruneOrphans(getKeySettings().map((key) => key.id));
+
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration((event) => {
+			if (event.affectsConfiguration('4sapi-copilot.showUsageStatusBar')) {
+				usageStats.refreshVisibility();
+			}
+		}),
+	);
 	// 预热倍率表，让模型名里的消耗倍率在首次打开选择器时就可显示
 	void pricing.ensure(getBaseUrl()).then(() => provider.refreshModelPicker());
 
@@ -99,6 +113,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export function deactivate(): void {
 	// 输出通道随扩展释放
+}
+
+// ---- 用量统计 ----
+
+/**
+ * 「Response details」由 VS Code 的内置解码器渲染，只认
+ * `prompt_tokens` / `completion_tokens` / `reasoning_tokens`，
+ * 缓存字段会被丢弃（`AgentHostByokLmHandler#_decodeUsage`）。
+ * 因此缓存命中率在这里以「状态栏 + 统计面板 + 日志」的形式呈现。
+ */
+async function showUsageStats(stats: UsageStats): Promise<void> {
+	const summary = stats.summary();
+	const recent = stats.recent();
+
+	if (summary.requests === 0) {
+		void vscode.window.showInformationMessage(
+			'4SAPI: 还没有记录到请求用量。发起一次对话后再看，或确认 4sapi-copilot.enableUsageReporting 未被关闭。',
+		);
+		return;
+	}
+
+	const lines = [
+		`输入 ${summary.promptTokens.toLocaleString()} token`,
+		`命中缓存 ${summary.cachedTokens.toLocaleString()}（${formatHitRate(summary.cacheHitRate)}）`,
+		`输出 ${summary.completionTokens.toLocaleString()} token`,
+	];
+
+	const header =
+		`最近 ${summary.requests} 次：缓存命中率 ${formatHitRate(summary.cacheHitRate)} · ` +
+		`输入 ${formatTokens(summary.promptTokens)} / 缓存 ${formatTokens(summary.cachedTokens)} / ` +
+		`输出 ${formatTokens(summary.completionTokens)}`;
+
+	await vscode.window.showQuickPick(
+		[...recent]
+			.reverse()
+			.slice(0, 20)
+			.map((record) => ({
+				label: `$(pulse) ${formatHitRate(record.cacheHitRate)}　缓存 ${record.cachedTokens.toLocaleString()}/${record.promptTokens.toLocaleString()}`,
+				description: record.model,
+				detail:
+					`${new Date(record.at).toLocaleTimeString()} · Key ${record.keyAlias} · 分组 ${record.group} · ` +
+					`输出 ${record.completionTokens.toLocaleString()}` +
+					(record.reasoningTokens > 0 ? `（思考 ${record.reasoningTokens.toLocaleString()}）` : '') +
+					` · ${(record.durationMs / 1000).toFixed(2)}s`,
+			})),
+		{
+			title: header,
+			placeHolder: lines.join('　|　'),
+		},
+	);
+}
+
+function getShowUsageStatusBar(): boolean {
+	return getConfig().get<boolean>('showUsageStatusBar', true);
 }
 
 // ---- 旧配置迁移 ----

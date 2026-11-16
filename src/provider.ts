@@ -24,6 +24,7 @@ import {
 } from './models';
 import type { PricingStore } from './pricingStore';
 import { pricingSignature } from './pricing';
+import { logUsage, normalizeUsage, type UsageStats } from './usage';
 import type { ChatRequest, ChatUsage, ResolvedKey, ResolvedModel } from './types';
 import type { KeyVault } from './vault';
 
@@ -46,6 +47,7 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 		context: vscode.ExtensionContext,
 		private readonly vault: KeyVault,
 		private readonly pricing: PricingStore,
+		private readonly usageStats?: UsageStats,
 	) {
 		context.subscriptions.push(
 			this.onDidChangeEmitter,
@@ -172,12 +174,21 @@ export class FourSapiChatProvider implements vscode.LanguageModelChatProvider {
 							this.charsPerToken,
 						);
 						reportUsageToCopilot(progress, usage, getUsageReportingEnabled());
-						logger.info(
-							`用量 ${model.apiModelId}`,
-							`prompt=${usage.prompt_tokens}`,
-							`completion=${usage.completion_tokens}`,
-							`cached=${usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0}`,
-						);
+						const normalized = normalizeUsage(usage);
+						const record = this.usageStats?.record({
+							model: model.apiModelId,
+							keyAlias: model.keyAlias,
+							group: model.group,
+							promptTokens: normalized.promptTokens,
+							completionTokens: normalized.completionTokens,
+							totalTokens: normalized.totalTokens,
+							cachedTokens: normalized.cachedTokens,
+							reasoningTokens: normalized.reasoningTokens,
+							durationMs: Date.now() - started,
+						});
+						if (record) {
+							logUsage(record);
+						}
 					},
 				},
 				token,

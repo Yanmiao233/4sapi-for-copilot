@@ -28,7 +28,7 @@
 
   > ⚠️ **各模型接受的档位并不相同**。实测 GLM 的 `-flash` 变体（如 `glm-5.3-flashx`）只接受 `low` / `high` / `max`，`medium`、`none` 会返回 400（"rejected by an internal MaaS component"），且无法关闭思考；完整版 `glm-5.3` / `glm-5.2` 则全部支持。插件已按模型族/变体给出安全的默认档位；若遇到其它模型报 400，插件会自动去掉思考参数重试一次并写入日志。
 - **安全**：每个 Key 的明文只存 VS Code SecretStorage（系统钥匙串），settings.json 里只有分组、别名等非机密元数据。删除 Key 会同时清理密钥库条目。添加 Key 时会立即**回读校验**，确保密钥真的写进去了才保存配置。
-- **可观测**：输出通道日志（Key / 分组 / 倍率 / 模型 / 思考深度 / 用量 / 耗时，verbose 可看请求体摘要）、token 用量上报给 Copilot、`测试连接` 命令逐个 Key 体检。
+- **可观测**：输出通道日志（Key / 分组 / 倍率 / 模型 / 思考深度 / 用量 / 耗时，verbose 可看请求体摘要）、token 用量上报给 Copilot、状态栏**缓存命中率**、`测试连接` / `诊断信息` / `查看用量与缓存命中率` 命令。
 - **零运行时依赖**：纯 VS Code API + Node 内置 fetch，无 Python / Docker / 本地代理。
 
 ## 环境要求
@@ -78,6 +78,7 @@ code --install-extension 4sapi-for-copilot-0.2.0.vsix
 | `maxTokens` | `0` | 全局 `max_tokens` 上限，`0` = 按模型 `maxOutputTokens` |
 | `temperature` / `topP` | `-1` | 全局采样参数，`-1` = 不发送 |
 | `enableUsageReporting` | `true` | 向 Copilot 上报 token 用量 |
+| `showUsageStatusBar` | `true` | 状态栏显示最近一次请求的缓存命中率 |
 | `debugMode` | `minimal` | `minimal` / `metadata` / `verbose` |
 
 ### `keys[]` 每个 Key 的字段
@@ -223,6 +224,27 @@ code --install-extension 4sapi-for-copilot-0.2.0.vsix
 | `4SAPI: 打开设置` | 跳转到本扩展设置 |
 | `4SAPI: 显示日志` | 打开「输出」面板的 **4SAPI** 通道（会自动切过去） |
 | `4SAPI: 诊断信息` | 打印每个 Key 的分组 / 倍率 / **密钥是否已在密钥库中**、倍率表缓存状态（不受 `debugMode` 限制） |
+| `4SAPI: 查看用量与缓存命中率` | 最近请求的缓存命中率、输入/输出 token、思考 token、耗时 |
+
+### 关于缓存命中率（重要）
+
+4SAPI 会返回真实缓存数据（实测 `prompt_tokens_details.cached_tokens`，例如 `6016 / 6022 → 99.9%`），
+但**Copilot 的「Response details」不显示它**：VS Code 内置的 usage 解码器
+（`AgentHostByokLmHandler#_decodeUsage`，1.146 实测）只读取
+`prompt_tokens` / `completion_tokens` / `completion_tokens_details.reasoning_tokens`，
+`prompt_tokens_details.cached_tokens` 被直接丢弃，因此 BYOK 模型的详情弹窗里
+只会出现 Input / Output tokens 两行。
+
+扩展侧能做的替代显示：
+
+1. **状态栏**（默认开启）：`$(pulse) 缓存 99.9%`，悬停看完整用量，点击打开历史列表；
+   由 `4sapi-copilot.showUsageStatusBar` 控制（`false` 关闭）。
+2. **日志**：每次请求写 `用量 <模型> prompt=… cached=6016(99.9%) completion=… reasoning=… 耗时=…`，
+   `debugMode: metadata` 即可见。
+3. **命令** `4SAPI: 查看用量与缓存命中率`：最近 20 次的滚动列表 + 累计命中率。
+
+> 我们仍会照常把 `prompt_tokens_details.cached_tokens` 写进 usage 数据部件——
+> 这样一旦 VS Code 后续版本支持该字段，详情弹窗会自动出现「Cached input tokens」一行。
 
 > **日志在哪看？** 两种方式等价：① 命令 `4SAPI: 显示日志` / `4SAPI: 诊断信息`（会自动打开面板并切换通道）；② 手动 `Ctrl+Shift+U`（或「查看 → 输出」），在面板**右上角的下拉框**里选 `4SAPI`。
 >

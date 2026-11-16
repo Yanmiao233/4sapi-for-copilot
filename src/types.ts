@@ -192,9 +192,22 @@ export interface ChatUsage {
 	prompt_tokens: number;
 	completion_tokens: number;
 	total_tokens: number;
+	/** DeepSeek 风格：命中缓存的 prompt token 数 */
 	prompt_cache_hit_tokens?: number;
+	/** DeepSeek 风格：未命中缓存的 prompt token 数 */
 	prompt_cache_miss_tokens?: number;
+	/** OpenAI 风格：`{ cached_tokens }` */
 	prompt_tokens_details?: { cached_tokens?: number };
+	completion_tokens_details?: {
+		reasoning_tokens?: number;
+		accepted_prediction_tokens?: number;
+		rejected_prediction_tokens?: number;
+	};
+	/** 部分中转的扁平写法 */
+	cached_tokens?: number;
+	/** Anthropic 兼容层的写法 */
+	cache_read_input_tokens?: number;
+	cache_creation_input_tokens?: number;
 }
 
 export interface ChatRequest {
